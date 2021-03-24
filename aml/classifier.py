@@ -5,7 +5,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 # from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
+from sklearn.compose import ColumnTransformer, make_column_selector
 from sklearn.feature_selection import SelectKBest
 #from sklearn.decomposition import PCA
 
@@ -23,12 +23,14 @@ from sklearn.neural_network import MLPClassifier
 
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 
-from sklearn.metrics import make_scorer, accuracy_score, roc_auc_score, f1_score, fbeta_score, confusion_matrix, ConfusionMatrixDisplay
+#from sklearn.metrics import make_scorer, accuracy_score, balanced_accuracy_score, roc_auc_score, f1_score, fbeta_score, confusion_matrix, ConfusionMatrixDisplay
 
 from scipy.stats import uniform
 
 import logging
 from typing import List, Dict, Tuple, Callable
+
+# %%
 
 
 class AutoMLClassifier:
@@ -44,12 +46,14 @@ class AutoMLClassifier:
                  try_GB: bool = False,
                  try_KM: bool = False,
                  try_SVC: bool = False,
+                 try_HGB: bool = False,
+                 try_MLP: bool = False,
                  ) -> None:
         self.scoring_function = scoring_function
         self.best_models = []  # sklearn Estimator
         self.random_state = 1234
         self.search_iterations = n_iter if n_iter > 0 else self.SEARCH_ITERATIONS
-        self.n_jobs = 10
+        self.n_jobs = -1
 
         self.try_LR = try_LR
         self.try_DT = try_DT
@@ -57,22 +61,29 @@ class AutoMLClassifier:
         self.try_GB = try_GB
         self.try_KM = try_KM
         self.try_SVC = try_SVC
+        self.try_HGB = try_HGB
+        self.try_MLP = try_MLP
 
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> None:
+    def fit(self, X: pd.DataFrame, y: pd.Series,
+            categorical: List[str] = [],
+            numeric: List[str] = [],
+            dates: List[str] = []
+            ) -> None:
+
         self.labels = list(y.unique())
         if len(self.labels) > 2:
             self.multiclass = True  # multiclass classification
 
-        categorical = []
-        numeric = []
-        dates = []
-
         # TODO: determine based on data
-        categorical = ['Gender', 'Education_Level',
-                       'Marital_Status', 'Income_Category', 'Card_Category']
-        numeric = ['Customer_Age', 'Dependent_count', 'Months_on_book', 'Total_Relationship_Count',
-                   'Months_Inactive_12_mon', 'Contacts_Count_12_mon', 'Credit_Limit', 'Total_Revolving_Bal',
-                   'Avg_Open_To_Buy', 'Total_Amt_Chng_Q4_Q1', 'Total_Trans_Amt', 'Total_Trans_Ct', 'Total_Ct_Chng_Q4_Q1', 'Avg_Utilization_Ratio']
+        if len(categorical) == 0:
+            categorical = make_column_selector(
+                dtype_include=['object', 'category', 'bool'])
+        if len(numeric) == 0:
+            numeric = make_column_selector(
+                dtype_include=['int64', 'float64']
+            )
+
+        #categorical = X.select_dtypes(include=[object, 'category', bool]).columns
 
         # TODO implement addition of months, weekday, day of month, hour, mminute, second ?
         if len(dates) > 0:
@@ -88,14 +99,16 @@ class AutoMLClassifier:
 
         models_and_params = []
 
-        scorer = self.get_scorer()
+        #scorer = self.get_scorer()
 
         if self.try_LR:
             models_and_params.append(self.get_LB_classifier_w_params())
 
-        if self.try_GB:
+        if self.try_HGB:
             models_and_params.append(self.get_HGB_classifier_w_params())
-            # models_and_params.append(self.get_GB_classifier_w_params())
+
+        if self.try_GB:
+            models_and_params.append(self.get_GB_classifier_w_params())
 
         if self.try_DT:
             models_and_params.append(self.get_DT_classifier_w_params())
@@ -108,6 +121,9 @@ class AutoMLClassifier:
 
         if self.try_SVC:
             models_and_params.append(self.get_SVC_classifier_w_params())
+
+        if self.try_MLP:
+            models_and_params.append(self.get_MLP_classifier_w_params())
 
         for classifier, hyperparams in models_and_params:
 
@@ -124,7 +140,8 @@ class AutoMLClassifier:
             if 1 == 1:
                 logging.info("Trying " + str(type(classifier)) + "...")
                 search = RandomizedSearchCV(
-                    pipeline, param_distributions=hyperparams, n_iter=self.search_iterations, scoring=scorer, n_jobs=self.n_jobs)
+                    pipeline, param_distributions=hyperparams, n_iter=self.search_iterations,
+                    scoring=self.scoring_function, n_jobs=self.n_jobs)
                 search.fit(X, y)
                 logging.info('Best parameters: %s' % search.best_params_)
                 logging.info('Best CV score: %s' % search.best_score_)
@@ -173,6 +190,7 @@ class AutoMLClassifier:
         # TODO: use categorical_features parameter!
 
         hyperparams = {
+            'clf__max_iter': [25, 100, 250],
             'clf__max_leaf_nodes': [*range(5, 100, 15), None],
             'clf__max_depth': [*range(1, 100), None],
             'clf__l2_regularization': [0, *range(1, 100)],
@@ -209,29 +227,46 @@ class AutoMLClassifier:
             'clf__p': [1, 2]}
         return classifier, hyperparams
 
+    def get_MLP_classifier_w_params(self):
+        classifier = MLPClassifier(random_state=1234)
+        hyperparams = {
+            # TODO: provide in ranges
+            'clf__hidden_layer_sizes': [(10), (25), (50), (100), (50, 10)],
+            'clf__solver': {'lbfgs', 'sgd', 'adam'},
+            'clf__activation': {'logistic', 'tanh', 'relu'},
+        }
+        return classifier, hyperparams
+
     def get_XX_classifier_w_params(self):
         classifier = None
         hyperparams = dict()
         return classifier, hyperparams
 
-    def get_scorer(self) -> Callable:
-        if self.scoring_function == 'roc_auc_score':
-            scorer = make_scorer(roc_auc_score, average='weighted')
-        elif self.scoring_function == 'f1_score':
-            scorer = make_scorer(f1_score, average='weighted')
-        else:
-            scorer = make_scorer(accuracy_score, average='weighted')
-        return scorer
+    # def get_scorer(self) -> Callable:
+    #     if self.scoring_function == 'roc_auc_score':
+    #         scorer = make_scorer(roc_auc_score, average='weighted')
+    #     elif self.scoring_function == 'f1_score':
+    #         scorer = make_scorer(f1_score, average='weighted')
+    #     else:  # 'accuracy_score'
+    #         scorer = make_scorer(accuracy_score, average='weighted')
+    #     return scorer
 
     def predict(self, X: pd.DataFrame) -> List[np.ndarray]:
-        # y = np.zeros((X.shape[0], len(self.best_models)))
         y_hat = []
-        for i, model in enumerate(self.best_models):
+        for model in self.best_models:
             y_hat.append(model.predict(X))
         return y_hat
 
-    def score(self, X: pd.DataFrame, y: pd.Series) -> List[np.ndarray]:
-        scores = []
-        for i, model in enumerate(self.best_models):
-            scores.append(self.scorer.__call__(model, X, y))
-        return scores
+    def predict_proba(self, X: pd.DataFrame) -> List[np.ndarray]:
+        y_hat = []
+        for model in self.best_models:
+            y_hat.append(model.predict_proba(X))
+        return y_hat
+
+    # def score(self, X: pd.DataFrame, y: pd.Series) -> List[np.ndarray]:
+    #     scores = []
+    #     for i, model in enumerate(self.best_models):
+    #         scores.append(self.scorer.__call__(model, X, y))
+    #     return scores
+
+# %%

@@ -39,13 +39,13 @@ class MyAutoMLClassifier:
         for i in range(cat_subset.shape[1]):
             categorical_values.append(
                 list(cat_subset.iloc[:, i].dropna().unique()))
-
-# define a pre-processing pipeline for the categorical variables. This pipeline will clean the blanks using the most frequent value and will one-hot encode them.
+# define a pipeline for the numerical variables, that will be cleaned according to a parameter that will be defined later and scaled according to a scaler that we’ll decide in the random search part.
         num_pipeline = Pipeline([
             ('cleaner', SimpleImputer()),
             ('scaler', StandardScaler())
         ])
-# define a pipeline for the numerical variables, that will be cleaned according to a parameter that will be defined later and scaled according to a scaler that we’ll decide in the random search part.
+
+# define a pre-processing pipeline for the categorical variables. This pipeline will clean the blanks using the most frequent value and will one-hot encode them.
         cat_pipeline = Pipeline([
             ('cleaner', SimpleImputer(strategy='most_frequent')),
             ('encoder', OneHotEncoder(sparse=False, categories=categorical_values))
@@ -164,6 +164,18 @@ class MyAutoMLClassifier:
     def predict_proba(self, X, y=None):
         return self.best_estimator_.predict_proba(X)
 
+# %%
+
+
+def show_metrics(y_test, y_hat):
+    print("Balanced accuracy score", balanced_accuracy_score(y_test, y_hat))
+    print("ROC AUC score", roc_auc_score(y_test, y_hat))
+    precision = precision_score(y_test, y_hat)
+    print("Precision", precision)
+    recall = recall_score(y_test, y_hat)
+    print("Recall", recall)
+    print("F1 score", 2*precision*recall/(precision+recall))
+
 
 # %%
 
@@ -179,27 +191,17 @@ X_train, X_test, y_train, y_test = train_test_split(
 model = MyAutoMLClassifier()
 model.fit(X_train, y_train)
 
-# %%
-
 
 # %%
-def show_metrics(y_test, y_hat):
-    print("Balanced accuracy score", balanced_accuracy_score(y_test, y_hat))
-    print("ROC AUC score", roc_auc_score(y_test, y_hat))
-    print("F1 score", f1_score(y_test, y_hat))
-    print("Precision", precision_score(y_test, y_hat))
-    print("Recall", recall_score(y_test, y_hat))
-
-
-# %%
+# show metrics for the model
 y_hat = model.predict(X_test)
 show_metrics(y_test, y_hat)
 
 
 # %%
-est = model.best_estimator_[-1]
+est = model.best_estimator_[-1]  # last: classifier
+print(est)
 pipe = model.best_pipeline
-# %%
 print(pipe)
 # %%
 # Credit card Churn prediction
@@ -216,6 +218,7 @@ churn_data = pd.read_csv('data/BankChurners.csv', usecols=cols)
 
 label = 'Attrition_Flag'
 
+# %%
 y = churn_data[label]
 X = churn_data.drop(label, axis=1)
 
@@ -226,11 +229,84 @@ y = y.apply(lambda x: labels.index(x))
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, stratify=y, random_state=1234, test_size=0.2)
 
-# %%
-churn_model = MyAutoMLClassifier(scoring_function='roc_auc', n_iter=10)
+churn_model = MyAutoMLClassifier(scoring_function='roc_auc', n_iter=50)
 churn_model.fit(X_train, y_train)
 
 # %%
 show_metrics(y_test, churn_model.predict(X_test))
 
+# %%
+print(churn_model.best_estimator_[-1])  # last: classifier
+print(churn_model.best_pipeline)
+
+# %%
+# functions to introduce some noise into data
+
+# pick a fraction of rows
+
+
+def make_NaNs(X, frac=.3, cols=[]):
+
+    n_cols = len(cols)
+
+    nrows = X.shape[0]
+    np.random.seed(1234)
+    mod_ind = np.random.randint(0, nrows-1, size=round(nrows*frac))
+
+    # and remove value of specific or random columns
+    columns = X.columns
+    for i in mod_ind:
+
+        if n_cols > 0:
+            for c in cols:
+                X.iloc[i][c] = np.NaN
+                #print(f'Set {i} {c} to NaN')
+        else:
+            c = np.random.choice(columns)
+            X.iloc[i][c] = np.NaN
+            #print(f'Set {i} {c} to NaN')
+    return X
+
+
+# %%
+d = load_breast_cancer()
+y = d['target']
+X = pd.DataFrame(d['data'], columns=d['feature_names'])
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.33, random_state=42)
+
+# %%
+# let's mess up some data
+X_train = make_NaNs(X_train, .5)
+X_train.info()
+
+
+# %%
+# train model on messy data
+model = MyAutoMLClassifier()
+model.fit(X_train, y_train)
+
+y_hat = model.predict(X_test)
+show_metrics(y_test, y_hat)
+
+
+# %%
+# make churn data messy and train model on messy data
+
+y = churn_data[label]
+X = churn_data.drop(label, axis=1)
+
+# convert to list
+labels = list(y.unique())
+y = y.apply(lambda x: labels.index(x))
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, stratify=y, random_state=1234, test_size=0.2)
+X_train = make_NaNs(X_train.copy(), 1, ['Dependent_count'])
+# X_train.info()
+X_train
+#  %%
+churn_model = MyAutoMLClassifier(scoring_function='roc_auc', n_iter=50)
+churn_model.fit(X_train, y_train)
 # %%
