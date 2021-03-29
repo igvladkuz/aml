@@ -2,11 +2,11 @@ import numpy as np
 import pandas as pd
 
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, RobustScaler, MinMaxScaler
 # from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer, make_column_selector
-from sklearn.feature_selection import SelectKBest
+from sklearn.feature_selection import SelectKBest, f_classif
 #from sklearn.decomposition import PCA
 
 from sklearn.linear_model import LogisticRegression
@@ -40,12 +40,13 @@ class AutoMLClassifier:
     CV = 5  # folds in cross-validation
 
     def __init__(self, scoring_function: str = '', n_iter: int = 0,
-                 try_LR: bool = True,
+                 try_LR: bool = False,
                  try_DT: bool = False,
                  try_RF: bool = False,
                  try_GB: bool = False,
                  try_KM: bool = False,
                  try_SVC: bool = False,
+                 try_LSVC: bool = False,
                  try_HGB: bool = False,
                  try_MLP: bool = False,
                  ) -> None:
@@ -61,6 +62,7 @@ class AutoMLClassifier:
         self.try_GB = try_GB
         self.try_KM = try_KM
         self.try_SVC = try_SVC
+        self.try_LSVC = try_LSVC
         self.try_HGB = try_HGB
         self.try_MLP = try_MLP
 
@@ -74,13 +76,18 @@ class AutoMLClassifier:
         if len(self.labels) > 2:
             self.multiclass = True  # multiclass classification
 
+        number_types = ['int64', 'float64']  # np.number
+        categorical_types = ['object', 'category', 'bool']
+
         # TODO: determine based on data
         if len(categorical) == 0:
             categorical = make_column_selector(
-                dtype_include=['object', 'category', 'bool'])
+                # dtype_include=categorical_types
+                dtype_exclude=number_types
+            )
         if len(numeric) == 0:
             numeric = make_column_selector(
-                dtype_include=['int64', 'float64']
+                dtype_include=number_types
             )
 
         #categorical = X.select_dtypes(include=[object, 'category', bool]).columns
@@ -89,13 +96,27 @@ class AutoMLClassifier:
         if len(dates) > 0:
             pass
 
-        encoder = ColumnTransformer(
-            [('onehotencoder', OneHotEncoder(dtype='int'), categorical),
-             ('standardscaler', StandardScaler(), numeric)],
+        cat_pipeline = Pipeline([
+            ('cleaner', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(dtype='int'))
+        ]
+        )
+
+        num_pipeline = Pipeline([
+            ('cleaner', SimpleImputer(strategy='mean')),
+            ('scaler', StandardScaler())
+        ])
+
+        preprocessor = ColumnTransformer(
+            [('categorical', cat_pipeline, categorical),
+             ('numerical', num_pipeline, numeric)],
             remainder='passthrough'
         )
 
-        feature_selection = SelectKBest()
+        # get total number of features after transformation
+        tot_num_features = preprocessor.fit_transform(X).shape[1]
+
+        feature_selector = SelectKBest(f_classif, k='all')
 
         models_and_params = []
 
@@ -111,7 +132,8 @@ class AutoMLClassifier:
             models_and_params.append(self.get_GB_classifier_w_params())
 
         if self.try_DT:
-            models_and_params.append(self.get_DT_classifier_w_params())
+            models_and_params.append(
+                self.get_DT_classifier_w_params(tot_num_features))
 
         if self.try_RF:
             models_and_params.append(self.get_RF_classifier_w_params())
@@ -122,18 +144,18 @@ class AutoMLClassifier:
         if self.try_SVC:
             models_and_params.append(self.get_SVC_classifier_w_params())
 
+        if self.try_LSVC:
+            models_and_params.append(self.get_LSVC_classifier_w_params())
+
         if self.try_MLP:
             models_and_params.append(self.get_MLP_classifier_w_params())
 
         for classifier, hyperparams in models_and_params:
 
-            # add other parameters
-            #hyperparams = {**hyperparams, 'fsel__k': ['all', *range(2, 10)]}
-
             pipeline = Pipeline([
-                #('fsel', feature_selection),
-                ('encoder', encoder),
-                ('clf', classifier)
+                ('preprocessor', preprocessor),
+                ('feature_selector', feature_selector),
+                ('classifier', classifier)
             ])
 
             # try:
@@ -157,30 +179,35 @@ class AutoMLClassifier:
             random_state=self.random_state, class_weight='balanced')
 
         hyperparams = {
-            'clf__C': uniform(loc=0, scale=4),
-            'clf__penalty': ['l1', 'l2', 'elasticnet', 'none'],
-            'clf__solver': ['newton-cg', 'lbfgs', 'liblinear', 'sag', 'saga'],
-            'clf__class_weight': [{'False': 0.1, 'True': 100}, {'False': 0.1, 'True': 1000}, 'balanced'],
+            'classifier__C': uniform(loc=0, scale=4),
+            'classifier__penalty': ['l1', 'l2', 'elasticnet', 'none'],
+            'classifier__solver': ['newton-cg', 'lbfgs', 'liblinear', 'sag', 'saga'],
+            'classifier__class_weight': [{'False': 0.1, 'True': 100}, {'False': 0.1, 'True': 1000}, 'balanced'],
         }
         return classifier, hyperparams
 
-    def get_DT_classifier_w_params(self):
+    def get_DT_classifier_w_params(self, total_features):
         classifier = DecisionTreeClassifier(
             random_state=1234, class_weight='balanced')
+
         hyperparams = {
-            'clf__max_depth': [*range(1, 100), None],
-            'clf__min_samples_split': [0.001, 0.05, 0.01, 0.05, 0.1, None],
-            'clf__criterion': ['gini', 'entropy'],
-            'clf__max_leaf_nodes': [*range(5, 100, 15), None],
+            'preprocessor__numerical__scaler': [None],  # no need for scaling
+            'preprocessor__numerical__cleaner__strategy': ['mean', 'median'],
+            'feature_selector__k': [*range(1, total_features, 5)] + ['all'],
+            'classifier__max_depth': [*range(1, 100), None],
+            'classifier__min_samples_split': [0.001, 0.05, 0.01, 0.05, 0.1, None],
+            'classifier__criterion': ['gini', 'entropy'],
+            'classifier__max_leaf_nodes': [*range(5, 100, 15), None],
         }
         return classifier, hyperparams
 
     def get_GB_classifier_w_params(self):
         classifier = GradientBoostingClassifier(random_state=1234)
+
         hyperparams = {
-            'clf__max_leaf_nodes': [*range(5, 100, 15), None],
-            'clf__max_depth': [*range(1, 100), None],
-            'clf__max_features': {'auto', 'sqrt', 'log2'},
+            'classifier__max_leaf_nodes': [*range(5, 100, 15), None],
+            'classifier__max_depth': [*range(1, 100), None],
+            'classifier__max_features': {'auto', 'sqrt', 'log2'},
         }
         return classifier, hyperparams
 
@@ -190,50 +217,63 @@ class AutoMLClassifier:
         # TODO: use categorical_features parameter!
 
         hyperparams = {
-            'clf__max_iter': [25, 100, 250],
-            'clf__max_leaf_nodes': [*range(5, 100, 15), None],
-            'clf__max_depth': [*range(1, 100), None],
-            'clf__l2_regularization': [0, *range(1, 100)],
+            'classifier__max_iter': [25, 100, 250],
+            'classifier__max_leaf_nodes': [*range(5, 100, 15), None],
+            'classifier__max_depth': [*range(1, 100), None],
+            'classifier__l2_regularization': [0, *range(1, 100)],
         }
         return classifier, hyperparams
 
     def get_SVC_classifier_w_params(self):
         classifier = SVC(random_state=1234, class_weight='balanced')
+
         hyperparams = {
-            'clf__C': uniform(loc=0, scale=4),
-            'clf__kernel': ['linear', 'poly', 'rbf', 'sigmoid'],
-            'clf__gamma': ['scale', 'auto'],
-            'clf__coef0': [0.0, 0.1, 1],
+            'classifier__C': uniform(loc=0, scale=4),
+            'classifier__kernel': ['linear', 'poly', 'rbf', 'sigmoid'],
+            'classifier__gamma': ['scale', 'auto'],
+            'classifier__coef0': [0.0, 0.1, 1],
+        }
+        return classifier, hyperparams
+
+    def get_LSVC_classifier_w_params(self):
+        classifier = LinearSVC(random_state=1234)
+        hyperparams = {
+            'preprocessor__numerical__scaler': [RobustScaler(), StandardScaler(), MinMaxScaler()],
+            'preprocessor__numerical__cleaner__strategy': ['mean', 'median'],
+            'classifier__C': np.arange(0.1, 1, 0.1)
         }
         return classifier, hyperparams
 
     def get_RF_classifier_w_params(self):
         classifier = RandomForestClassifier(
             random_state=1234, class_weight='balanced')
+
         hyperparams = {
-            'clf__n_estimators': range(1, 200),
-            'clf__criterion': ['gini', 'entropy'],
-            'clf__max_depth': [*range(1, 100, 2), None],
-            'clf__min_samples_leaf': [*range(1, 20, 1), None],
-            'clf__min_samples_split': [0.001, 0.05, 0.01, 0.05, 0.1, None],
-            'clf__max_leaf_nodes': [*range(5, 100, 15), None],
-            'clf__bootstrap': [True, False]}
+            'classifier__n_estimators': range(1, 200),
+            'classifier__criterion': ['gini', 'entropy'],
+            'classifier__max_depth': [*range(1, 100, 2), None],
+            'classifier__min_samples_leaf': [*range(1, 20, 1), None],
+            'classifier__min_samples_split': [0.001, 0.05, 0.01, 0.05, 0.1, None],
+            'classifier__max_leaf_nodes': [*range(5, 100, 15), None],
+            'classifier__bootstrap': [True, False]}
         return classifier, hyperparams
 
     def get_KM_classifier_w_params(self):
         classifier = KNeighborsClassifier()
+
         hyperparams = {
-            'clf__n_neighbors': range(1, 20),
-            'clf__p': [1, 2]}
+            'classifier__n_neighbors': range(1, 20),
+            'classifier__p': [1, 2]}
         return classifier, hyperparams
 
     def get_MLP_classifier_w_params(self):
         classifier = MLPClassifier(random_state=1234)
+
         hyperparams = {
             # TODO: provide in ranges
-            'clf__hidden_layer_sizes': [(10), (25), (50), (100), (50, 10)],
-            'clf__solver': {'lbfgs', 'sgd', 'adam'},
-            'clf__activation': {'logistic', 'tanh', 'relu'},
+            'classifier__hidden_layer_sizes': [(10), (25), (50), (100), (50, 10)],
+            'classifier__solver': {'lbfgs', 'sgd', 'adam'},
+            'classifier__activation': {'logistic', 'tanh', 'relu'},
         }
         return classifier, hyperparams
 
