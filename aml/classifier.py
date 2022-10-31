@@ -1,3 +1,4 @@
+from aml.estimatorbase import PreprocessorMixin, PredictorMixin
 import numpy as np
 import pandas as pd
 
@@ -30,10 +31,8 @@ from scipy.stats import uniform
 import logging
 from typing import List, Dict, Tuple, Callable
 
-# %%
 
-
-class AutoMLClassifier:
+class AutoMLClassifier(PreprocessorMixin, PredictorMixin):
 
     SEARCH_ITERATIONS = 100
     TEST_SIZE = 0.25
@@ -71,48 +70,15 @@ class AutoMLClassifier:
             numeric: List[str] = [],
             dates: List[str] = []
             ) -> None:
+        self.categorical = categorical
+        self.dates = dates
+        self.numeric = numeric
 
         self.labels = list(y.unique())
         if len(self.labels) > 2:
             self.multiclass = True  # multiclass classification
 
-        number_types = ['int64', 'float64']  # np.number
-        categorical_types = ['object', 'category', 'bool']
-
-        # TODO: determine based on data
-        if len(categorical) == 0:
-            categorical = make_column_selector(
-                # dtype_include=categorical_types
-                dtype_exclude=number_types
-            )
-        if len(numeric) == 0:
-            numeric = make_column_selector(
-                dtype_include=number_types
-            )
-
-        #categorical = X.select_dtypes(include=[object, 'category', bool]).columns
-
-        # TODO implement addition of months, weekday, day of month, hour, mminute, second ?
-        if len(dates) > 0:
-            pass
-
-        cat_pipeline = Pipeline([
-            ('cleaner', SimpleImputer(strategy='most_frequent')),
-            ('encoder', OneHotEncoder(dtype='int'))
-        ]
-        )
-
-        num_pipeline = Pipeline([
-            ('cleaner', SimpleImputer(strategy='mean')),
-            ('scaler', StandardScaler())
-        ])
-
-        preprocessor = ColumnTransformer(
-            [('categorical', cat_pipeline, categorical),
-             ('numerical', num_pipeline, numeric)],
-            remainder='passthrough'
-        )
-
+        preprocessor = self.get_preprocessor()
         # get total number of features after transformation
         tot_num_features = preprocessor.fit_transform(X).shape[1]
 
@@ -126,7 +92,7 @@ class AutoMLClassifier:
             models_and_params.append(self.get_LB_classifier_w_params())
 
         if self.try_HGB:
-            models_and_params.append(self.get_HGB_classifier_w_params())
+            models_and_params.append(self.get_HGB_classifier_w_params(tot_num_features))
 
         if self.try_GB:
             models_and_params.append(self.get_GB_classifier_w_params())
@@ -207,16 +173,17 @@ class AutoMLClassifier:
         hyperparams = {
             'classifier__max_leaf_nodes': [*range(5, 100, 15), None],
             'classifier__max_depth': [*range(1, 100), None],
-            'classifier__max_features': {'auto', 'sqrt', 'log2'},
+            'classifier__max_features': ['auto', 'sqrt', 'log2'],
         }
         return classifier, hyperparams
 
-    def get_HGB_classifier_w_params(self):
+    def get_HGB_classifier_w_params(self, total_features):
         classifier = HistGradientBoostingClassifier(random_state=1234)
 
         # TODO: use categorical_features parameter!
 
         hyperparams = {
+            'feature_selector__k': [*range(1, total_features, 5)] + ['all'],
             'classifier__max_iter': [25, 100, 250],
             'classifier__max_leaf_nodes': [*range(5, 100, 15), None],
             'classifier__max_depth': [*range(1, 100), None],
@@ -272,8 +239,8 @@ class AutoMLClassifier:
         hyperparams = {
             # TODO: provide in ranges
             'classifier__hidden_layer_sizes': [(10), (25), (50), (100), (50, 10)],
-            'classifier__solver': {'lbfgs', 'sgd', 'adam'},
-            'classifier__activation': {'logistic', 'tanh', 'relu'},
+            'classifier__solver': ['lbfgs', 'sgd', 'adam'],
+            'classifier__activation': ['logistic', 'tanh', 'relu'],
         }
         return classifier, hyperparams
 
@@ -291,17 +258,17 @@ class AutoMLClassifier:
     #         scorer = make_scorer(accuracy_score, average='weighted')
     #     return scorer
 
-    def predict(self, X: pd.DataFrame) -> List[np.ndarray]:
-        y_hat = []
-        for model in self.best_models:
-            y_hat.append(model.predict(X))
-        return y_hat
+    # def predict(self, X: pd.DataFrame) -> List[np.ndarray]:
+    #     y_hat = []
+    #     for model in self.best_models:
+    #         y_hat.append(model.predict(X))
+    #     return y_hat
 
-    def predict_proba(self, X: pd.DataFrame) -> List[np.ndarray]:
-        y_hat = []
-        for model in self.best_models:
-            y_hat.append(model.predict_proba(X))
-        return y_hat
+    # def predict_proba(self, X: pd.DataFrame) -> List[np.ndarray]:
+    #     y_hat = []
+    #     for model in self.best_models:
+    #         y_hat.append(model.predict_proba(X))
+    #     return y_hat
 
     # def score(self, X: pd.DataFrame, y: pd.Series) -> List[np.ndarray]:
     #     scores = []

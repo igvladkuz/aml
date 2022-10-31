@@ -1,0 +1,7 @@
+*.pyc
+venv
+.env
+__pycache__
+.DS_Store
+Churners
+Kickstarter
